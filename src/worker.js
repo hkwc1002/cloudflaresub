@@ -728,12 +728,28 @@ async function handleSub(url, env) {
 
 async function listAllSubscriptionKeys(env) {
   const keys = [];
-  let cursor;
+  let cursor = null;
+
   do {
-    const page = await env.SUB_STORE.list({ prefix: 'sub:', cursor });
+    const options = { prefix: 'sub:' };
+    if (cursor) {
+      options.cursor = cursor;
+    }
+
+    const page = await env.SUB_STORE.list(options);
     keys.push(...(page.keys || []));
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
+
+    if (page.list_complete) {
+      break;
+    }
+
+    if (!page.cursor) {
+      throw new Error('KV list pagination returned no cursor.');
+    }
+
+    cursor = page.cursor;
+  } while (true);
+
   return keys;
 }
 
@@ -741,44 +757,55 @@ async function handleListSubscriptions(request, env) {
   const adminCheck = validateAdmin(request, env);
   if (!adminCheck.ok) return adminCheck.response;
 
-  const keys = await listAllSubscriptionKeys(env);
-  const items = await Promise.all(
-    keys.map(async (key) => {
-      const raw = await env.SUB_STORE.get(key.name);
-      if (!raw) return null;
-      try {
-        const record = JSON.parse(raw);
-        const payload = getPayload(record) || {};
-        const id = key.name.slice('sub:'.length);
-        return {
-          id,
-          status: record?.schemaVersion === 2 ? record.status : 'legacy',
-          createdAt: record?.createdAt || payload.createdAt || '',
-          updatedAt: record?.updatedAt || '',
-          revokedAt: record?.revokedAt || null,
-          nodeCount: Array.isArray(payload.nodes) ? payload.nodes.length : 0,
-          namePrefix: payload.options?.namePrefix || '',
-        };
-      } catch {
-        return {
-          id: key.name.slice('sub:'.length),
-          status: 'invalid',
-          createdAt: '',
-          updatedAt: '',
-          revokedAt: null,
-          nodeCount: 0,
-          namePrefix: '',
-        };
-      }
-    }),
-  );
+  try {
+    const keys = await listAllSubscriptionKeys(env);
+    const items = await Promise.all(
+      keys.map(async (key) => {
+        const raw = await env.SUB_STORE.get(key.name);
+        if (!raw) return null;
+        try {
+          const record = JSON.parse(raw);
+          const payload = getPayload(record) || {};
+          const id = key.name.slice('sub:'.length);
+          return {
+            id,
+            status: record?.schemaVersion === 2 ? record.status : 'legacy',
+            createdAt: record?.createdAt || payload.createdAt || '',
+            updatedAt: record?.updatedAt || '',
+            revokedAt: record?.revokedAt || null,
+            nodeCount: Array.isArray(payload.nodes) ? payload.nodes.length : 0,
+            namePrefix: payload.options?.namePrefix || '',
+          };
+        } catch {
+          return {
+            id: key.name.slice('sub:'.length),
+            status: 'invalid',
+            createdAt: '',
+            updatedAt: '',
+            revokedAt: null,
+            nodeCount: 0,
+            namePrefix: '',
+          };
+        }
+      }),
+    );
 
-  return json({
-    ok: true,
-    subscriptions: items
-      .filter(Boolean)
-      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
-  });
+    return json({
+      ok: true,
+      subscriptions: items
+        .filter(Boolean)
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+    });
+  } catch (error) {
+    return json(
+      {
+        ok: false,
+        error: '读取订阅列表失败。',
+        detail: error instanceof Error ? error.message : String(error),
+      },
+      500,
+    );
+  }
 }
 
 async function removeDedupMappingIfOwned(env, record, id) {
