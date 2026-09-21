@@ -31,6 +31,25 @@
         </div>
       </section>
 
+      <section class="card admin-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">管理认证</p>
+            <h2>订阅管理令牌</h2>
+            <p class="section-desc">
+              输入 Cloudflare Worker Secret <code>SUB_ADMIN_TOKEN</code>。令牌只保存在当前标签页的 sessionStorage 中，关闭标签页后清除。
+            </p>
+          </div>
+        </div>
+        <div class="admin-token-row">
+          <input id="adminToken" type="password" autocomplete="off" placeholder="输入 SUB_ADMIN_TOKEN" />
+          <button id="saveAdminTokenBtn" type="button">保存本次会话</button>
+          <button id="clearAdminTokenBtn" type="button" class="secondary">清除</button>
+          <button id="refreshSubscriptionsBtn" type="button" class="secondary">刷新订阅</button>
+        </div>
+        <p id="adminStatus" class="hint admin-status"></p>
+      </section>
+
       <section class="grid two-col">
         <form id="generator-form" class="card stack-lg">
           <div>
@@ -85,7 +104,7 @@ cf.example.com:443#US-Edge"
             <li>不会帮你找优选 IP，只负责把你现成的优选 IP 替换进节点。</li>
             <li>生成的链接是“同一份节点内容”的不同导出格式，分别给不同客户端使用。</li>
             <li>推荐勾选“保留原 Host / SNI”，这样更适合 Cloudflare CDN 场景。</li>
-            <li>订阅链接里的节点信息会通过服务端密钥加密，请不要把链接公开分享。</li>
+            <li>每条订阅使用独立访问令牌保护，并可随时吊销或重新签发；请不要公开分享订阅链接。</li>
           </ul>
 
           <div class="client-box">
@@ -246,6 +265,42 @@ cf.example.com:443#US-Edge"
             </table>
           </div>
         </div>
+      </section>
+
+      <section id="managementSection" class="card management-section stack-lg">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">管理</p>
+            <h2>订阅记录</h2>
+            <p class="section-desc">
+              新订阅默认长期有效。发现链接泄漏时可“吊销”或“重新签发”；重新签发会生成新的 ID 与访问令牌。
+            </p>
+          </div>
+        </div>
+
+        <div id="subscriptionEmpty" class="empty-state">
+          保存管理员令牌后可查看和管理订阅。
+        </div>
+
+        <div class="table-wrap">
+          <table class="management-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>状态</th>
+                <th>创建时间</th>
+                <th>节点数</th>
+                <th>前缀</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="subscriptionTableBody"></tbody>
+          </table>
+        </div>
+
+        <p class="hint">
+          注意：吊销订阅只能阻止再次下载。如果对方已经保存了节点 UUID/密码，需要同时轮换实际节点凭据才能彻底失效。
+        </p>
       </section>
     </main>
 
