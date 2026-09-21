@@ -45,7 +45,7 @@ const env = {
 
 const generateBody = {
   nodeLinks:
-    'vless://00000000-0000-4000-8000-000000000001@origin.example.com:443?type=ws&security=tls&host=origin.example.com&sni=origin.example.com&path=%2Fws#demo',
+    'vless://00000000-0000-4000-8000-000000000001@origin.example.com:443?type=xhttp&encryption=none&security=tls&host=origin.example.com&sni=origin.example.com&path=%2Fxhttp&mode=packet-up&alpn=h2%2Chttp%2F1.1&fp=chrome&x_padding_bytes=100-1000&extra=%7B%22headers%22%3A%7B%22X-Test%22%3A%22yes%22%7D%2C%22xPaddingBytes%22%3A%22100-1000%22%7D#demo',
   preferredIps: '104.16.1.2#CF-01',
   namePrefix: 'CF',
   keepOriginalHost: true,
@@ -96,7 +96,17 @@ assert.equal(JSON.stringify(rawRecord).includes('subscription-master-secret'), f
 
 response = await worker.fetch(new Request(generated.urls.clash), env);
 assert.equal(response.status, 200);
-assert.match(await response.text(), /proxies:/);
+const clashText = await response.text();
+assert.match(clashText, /proxies:/);
+assert.match(clashText, /network: xhttp/);
+assert.match(clashText, /xhttp-opts:/);
+assert.match(clashText, /mode: "packet-up"/);
+assert.match(clashText, /path: "\/xhttp"/);
+assert.match(clashText, /host: "origin\.example\.com"/);
+assert.match(clashText, /alpn: \["h2", "http\/1\.1"\]/);
+assert.match(clashText, /client-fingerprint: "chrome"/);
+assert.match(clashText, /x-padding-bytes: "100-1000"/);
+assert.match(clashText, /"X-Test": "yes"/);
 
 const badUrl = new URL(generated.urls.clash);
 badUrl.searchParams.set('token', 'bad-token');
