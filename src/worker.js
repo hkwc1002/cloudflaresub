@@ -80,8 +80,51 @@ function parseVmess(link) {
   };
 }
 
+function decodeJsonParam(raw = '') {
+  let value = String(raw || '').trim();
+  if (!value) return {};
+
+  for (let i = 0; i < 3; i++) {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {}
+
+    try {
+      const decoded = decodeURIComponent(value);
+      if (decoded === value) break;
+      value = decoded;
+    } catch {
+      break;
+    }
+  }
+
+  return {};
+}
+
+function firstDefined(source, keys) {
+  for (const key of keys) {
+    if (source && source[key] !== undefined && source[key] !== null && source[key] !== '') {
+      return source[key];
+    }
+  }
+  return '';
+}
+
+function parseOptionalBoolean(value) {
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return undefined;
+}
+
 function parseUrlLike(link, type) {
   const u = new URL(link);
+  const params = Object.fromEntries(u.searchParams.entries());
+  const network = params.type || 'tcp';
+  const xhttpExtra = network === 'xhttp' ? decodeJsonParam(params.extra || '') : {};
+
   return {
     type,
     name: decodeURIComponent(u.hash.replace(/^#/, '')) || type,
@@ -89,14 +132,97 @@ function parseUrlLike(link, type) {
     port: Number(u.port || 443),
     password: type === 'trojan' ? decodeURIComponent(u.username) : undefined,
     uuid: type === 'vless' ? decodeURIComponent(u.username) : undefined,
-    network: u.searchParams.get('type') || 'tcp',
-    tls: (u.searchParams.get('security') || '').toLowerCase() === 'tls',
-    host: u.searchParams.get('host') || u.searchParams.get('sni') || '',
-    path: u.searchParams.get('path') || '/',
-    sni: u.searchParams.get('sni') || u.searchParams.get('host') || '',
-    fp: u.searchParams.get('fp') || '',
-    alpn: u.searchParams.get('alpn') || '',
-    flow: u.searchParams.get('flow') || '',
+    network,
+    tls: (params.security || '').toLowerCase() === 'tls',
+    host: params.host || params.sni || '',
+    path: params.path || '/',
+    sni: params.sni || params.host || '',
+    fp: params.fp || '',
+    alpn: params.alpn || '',
+    flow: params.flow || '',
+    encryption: params.encryption || '',
+    packetEncoding:
+      params.packetEncoding ||
+      params['packet-encoding'] ||
+      params.packet_encoding ||
+      '',
+    params,
+    xhttp: network === 'xhttp'
+      ? {
+          mode: params.mode || firstDefined(xhttpExtra, ['mode']),
+          headers:
+            xhttpExtra.headers && typeof xhttpExtra.headers === 'object'
+              ? xhttpExtra.headers
+              : {},
+          noGrpcHeader: parseOptionalBoolean(
+            params.no_grpc_header ||
+            params.noGRPCHeader ||
+            firstDefined(xhttpExtra, ['no_grpc_header', 'noGRPCHeader']),
+          ),
+          xPaddingBytes:
+            params.x_padding_bytes ||
+            params.xPaddingBytes ||
+            firstDefined(xhttpExtra, ['x_padding_bytes', 'xPaddingBytes']),
+          xPaddingObfsMode: parseOptionalBoolean(
+            params.x_padding_obfs_mode ||
+            params.xPaddingObfsMode ||
+            firstDefined(xhttpExtra, ['x_padding_obfs_mode', 'xPaddingObfsMode']),
+          ),
+          xPaddingKey:
+            params.x_padding_key ||
+            params.xPaddingKey ||
+            firstDefined(xhttpExtra, ['x_padding_key', 'xPaddingKey']),
+          xPaddingHeader:
+            params.x_padding_header ||
+            params.xPaddingHeader ||
+            firstDefined(xhttpExtra, ['x_padding_header', 'xPaddingHeader']),
+          xPaddingPlacement:
+            params.x_padding_placement ||
+            params.xPaddingPlacement ||
+            firstDefined(xhttpExtra, ['x_padding_placement', 'xPaddingPlacement']),
+          xPaddingMethod:
+            params.x_padding_method ||
+            params.xPaddingMethod ||
+            firstDefined(xhttpExtra, ['x_padding_method', 'xPaddingMethod']),
+          uplinkHttpMethod:
+            params.uplink_http_method ||
+            params.uplinkHTTPMethod ||
+            firstDefined(xhttpExtra, ['uplink_http_method', 'uplinkHTTPMethod']),
+          sessionPlacement:
+            params.session_placement ||
+            params.sessionPlacement ||
+            params.sessionIDPlacement ||
+            firstDefined(xhttpExtra, [
+              'session_placement',
+              'sessionPlacement',
+              'sessionIDPlacement',
+            ]),
+          sessionKey:
+            params.session_key ||
+            params.sessionKey ||
+            params.sessionIDKey ||
+            firstDefined(xhttpExtra, ['session_key', 'sessionKey', 'sessionIDKey']),
+          sessionTable:
+            params.session_table ||
+            params.sessionTable ||
+            params.sessionIDTable ||
+            firstDefined(xhttpExtra, [
+              'session_table',
+              'sessionTable',
+              'sessionIDTable',
+            ]),
+          sessionLength:
+            params.session_length ||
+            params.sessionLength ||
+            params.sessionIDLength ||
+            firstDefined(xhttpExtra, [
+              'session_length',
+              'sessionLength',
+              'sessionIDLength',
+            ]),
+          rawExtra: params.extra || '',
+        }
+      : null,
   };
 }
 
@@ -178,14 +304,31 @@ function encodeVmess(node) {
 
 function encodeVless(node) {
   const url = new URL(`vless://${encodeURIComponent(node.uuid)}@${node.server}:${node.port}`);
-  url.searchParams.set('type', node.network || 'ws');
-  if (node.tls) url.searchParams.set('security', 'tls');
-  if (node.host) url.searchParams.set('host', node.host);
-  if (node.sni) url.searchParams.set('sni', node.sni);
-  if (node.path) url.searchParams.set('path', node.path);
-  if (node.alpn) url.searchParams.set('alpn', node.alpn);
-  if (node.fp) url.searchParams.set('fp', node.fp);
-  if (node.flow) url.searchParams.set('flow', node.flow);
+  const params = new URLSearchParams(node.params || {});
+
+  params.set('type', node.network || 'ws');
+  if (node.tls) params.set('security', 'tls');
+  if (node.host) params.set('host', node.host);
+  if (node.sni) params.set('sni', node.sni);
+  if (node.path) params.set('path', node.path);
+  if (node.alpn) params.set('alpn', node.alpn);
+  if (node.fp) params.set('fp', node.fp);
+  if (node.flow) params.set('flow', node.flow);
+  if (node.encryption) params.set('encryption', node.encryption);
+  if (
+    node.packetEncoding &&
+    !params.has('packetEncoding') &&
+    !params.has('packet-encoding') &&
+    !params.has('packet_encoding')
+  ) {
+    params.set('packetEncoding', node.packetEncoding);
+  }
+
+  if (node.network === 'xhttp' && node.xhttp?.mode) {
+    params.set('mode', node.xhttp.mode);
+  }
+
+  url.search = params.toString();
   url.hash = node.name;
   return url.toString();
 }
@@ -260,8 +403,30 @@ function renderClash(nodes) {
           `    network: ${node.network || 'ws'}`,
         ];
 
+        if (node.flow) {
+          lines.push(`    flow: "${escapeYaml(node.flow)}"`);
+        }
+
+        if (node.packetEncoding) {
+          lines.push(`    packet-encoding: "${escapeYaml(node.packetEncoding)}"`);
+        }
+
         if (node.sni) {
           lines.push(`    servername: "${escapeYaml(node.sni)}"`);
+        }
+
+        const alpn = String(node.alpn || '')
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean);
+        if (alpn.length) {
+          lines.push(
+            `    alpn: [${alpn.map((item) => `"${escapeYaml(item)}"`).join(', ')}]`,
+          );
+        }
+
+        if (node.fp) {
+          lines.push(`    client-fingerprint: "${escapeYaml(node.fp)}"`);
         }
 
         if ((node.network || 'ws') === 'ws') {
@@ -271,6 +436,75 @@ function renderClash(nodes) {
             `      headers:`,
             `        Host: "${escapeYaml(node.host || node.sni || '')}"`
           );
+        }
+
+        if (node.network === 'xhttp') {
+          const xhttp = node.xhttp || {};
+          lines.push(
+            `    xhttp-opts:`,
+            `      path: "${escapeYaml(node.path || '/')}"`,
+            `      host: "${escapeYaml(node.host || node.sni || '')}"`,
+          );
+
+          if (xhttp.mode) {
+            lines.push(`      mode: "${escapeYaml(xhttp.mode)}"`);
+          }
+
+          if (xhttp.headers && Object.keys(xhttp.headers).length) {
+            lines.push(`      headers:`);
+            for (const [key, value] of Object.entries(xhttp.headers)) {
+              lines.push(
+                `        "${escapeYaml(key)}": "${escapeYaml(
+                  Array.isArray(value) ? value.join(', ') : String(value),
+                )}"`,
+              );
+            }
+          }
+
+          if (xhttp.noGrpcHeader !== undefined) {
+            lines.push(`      no-grpc-header: ${xhttp.noGrpcHeader ? 'true' : 'false'}`);
+          }
+          if (xhttp.xPaddingBytes) {
+            lines.push(`      x-padding-bytes: "${escapeYaml(xhttp.xPaddingBytes)}"`);
+          }
+          if (xhttp.xPaddingObfsMode !== undefined) {
+            lines.push(
+              `      x-padding-obfs-mode: ${xhttp.xPaddingObfsMode ? 'true' : 'false'}`,
+            );
+          }
+          if (xhttp.xPaddingKey) {
+            lines.push(`      x-padding-key: "${escapeYaml(xhttp.xPaddingKey)}"`);
+          }
+          if (xhttp.xPaddingHeader) {
+            lines.push(`      x-padding-header: "${escapeYaml(xhttp.xPaddingHeader)}"`);
+          }
+          if (xhttp.xPaddingPlacement) {
+            lines.push(
+              `      x-padding-placement: "${escapeYaml(xhttp.xPaddingPlacement)}"`,
+            );
+          }
+          if (xhttp.xPaddingMethod) {
+            lines.push(`      x-padding-method: "${escapeYaml(xhttp.xPaddingMethod)}"`);
+          }
+          if (xhttp.uplinkHttpMethod) {
+            lines.push(
+              `      uplink-http-method: "${escapeYaml(xhttp.uplinkHttpMethod)}"`,
+            );
+          }
+          if (xhttp.sessionPlacement) {
+            lines.push(
+              `      session-placement: "${escapeYaml(xhttp.sessionPlacement)}"`,
+            );
+          }
+          if (xhttp.sessionKey) {
+            lines.push(`      session-key: "${escapeYaml(xhttp.sessionKey)}"`);
+          }
+          if (xhttp.sessionTable) {
+            lines.push(`      session-table: "${escapeYaml(xhttp.sessionTable)}"`);
+          }
+          if (xhttp.sessionLength) {
+            lines.push(`      session-length: "${escapeYaml(xhttp.sessionLength)}"`);
+          }
         }
 
         return lines.join('\n');
