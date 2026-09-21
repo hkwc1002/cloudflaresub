@@ -315,7 +315,14 @@ function encodeVless(node) {
   if (node.fp) params.set('fp', node.fp);
   if (node.flow) params.set('flow', node.flow);
   if (node.encryption) params.set('encryption', node.encryption);
-  if (node.packetEncoding) params.set('packetEncoding', node.packetEncoding);
+  if (
+    node.packetEncoding &&
+    !params.has('packetEncoding') &&
+    !params.has('packet-encoding') &&
+    !params.has('packet_encoding')
+  ) {
+    params.set('packetEncoding', node.packetEncoding);
+  }
 
   if (node.network === 'xhttp' && node.xhttp?.mode) {
     params.set('mode', node.xhttp.mode);
