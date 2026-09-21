@@ -20,7 +20,11 @@ class MemoryKV {
     this.map.delete(key);
   }
 
-  async list({ prefix = '' } = {}) {
+  async list(options = {}) {
+    if (Object.prototype.hasOwnProperty.call(options, 'cursor') && options.cursor === undefined) {
+      throw new TypeError('cursor must not be undefined');
+    }
+    const prefix = options.prefix || '';
     const keys = [...this.map.keys()]
       .filter((key) => key.startsWith(prefix))
       .sort()
