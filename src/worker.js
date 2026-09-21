@@ -814,7 +814,7 @@ async function handleGenerate(request, env, url) {
 
   const nodes = buildNodes(baseNodes, preferredEndpoints, options);
   const payload = {
-    version: 2,
+    version: 3,
     createdAt: new Date().toISOString(),
     options,
     nodes,
@@ -829,7 +829,10 @@ async function handleGenerate(request, env, url) {
     if (rawExisting) {
       try {
         const existing = JSON.parse(rawExisting);
-        if (isActiveV2Record(existing)) {
+        if (
+          isActiveV2Record(existing) &&
+          Number(getPayload(existing)?.version || 0) >= 3
+        ) {
           const urls = await buildSubscriptionUrls(url.origin, id, existing, env);
           return json(
             await generateResponse(
