@@ -19,8 +19,10 @@
 - 支持 Base64 订阅文本自动展开
 - 支持 `host[:port][#remark]` 格式的优选地址
 - 结果写入 Workers KV，生成 `/sub/:id` 短链
-- 相同输入自动去重（7 天 TTL）
-- 支持 `SUB_ACCESS_TOKEN` 访问令牌保护
+- 相同输入自动去重；新订阅默认长期保存，直到主动吊销/删除
+- 每条订阅使用独立 HMAC 访问令牌，可单独吊销或重新签发
+- 支持 `SUB_ACCESS_TOKEN` 作为订阅签名主密钥
+- 支持 `SUB_ADMIN_TOKEN` 保护生成与管理 API
 - 支持导出：Raw（Base64）/ Clash（YAML）/ Surge（文本）
 
 ## 项目结构
@@ -81,17 +83,20 @@ cloudflaresub/
 - Namespace 选择上一步创建的 KV
 - 保存并重新部署
 
-### 6) 配置访问令牌 Secret
+### 6) 配置两个 Secret
 
-- 在 Worker 项目中进入 `Settings` -> `Variables`
-- 在 `Secrets` 区域添加：
-  - Key: `SUB_ACCESS_TOKEN`
-  - Value: 你自定义的一串令牌
-- 保存后重新部署
+在 Worker 项目中进入 `Settings` -> `Variables`，在 Secrets 中添加：
+
+- `SUB_ACCESS_TOKEN`：订阅访问令牌的 HMAC 签名主密钥。建议至少 32 字节随机值。
+- `SUB_ADMIN_TOKEN`：生成/查看/吊销/重新签发/删除订阅时使用的管理员密钥。建议与 `SUB_ACCESS_TOKEN` 完全不同。
 
 说明：
-- 设置后，请求 `/sub/:id` 必须带 `?token=...`
-- 不设置也可运行，但订阅链接没有二次访问保护
+
+- 新订阅的 URL Token 是按“订阅 ID + 随机 nonce”独立派生的，不直接暴露 `SUB_ACCESS_TOKEN`。
+- 轮换 `SUB_ACCESS_TOKEN` 可以一次性使所有新格式订阅 URL 失效（全局紧急开关）。
+- `SUB_ADMIN_TOKEN` 只用于管理 API，不会写入订阅 URL。
+- 网页端只把管理员 Token 保存在当前标签页的 `sessionStorage`，关闭标签页后清除。
+- 如果未配置 `SUB_ADMIN_TOKEN`，生成和管理 API 会返回 503。
 
 ### 7) 验证线上服务
 
@@ -171,8 +176,48 @@ curl "https://<worker>/sub/<id>?target=clash&token=<SUB_ACCESS_TOKEN>"
 ## 注意事项
 
 - `src/worker.js` 当前是 KV 短链方案，不依赖 `SUB_LINK_SECRET`
-- 每条订阅记录默认保存 7 天（TTL）
+- 新格式订阅默认不设置 TTL，会一直保存到主动吊销或删除
 - Surge 导出当前仅包含 `vmess` / `trojan`
+
+
+## 订阅安全与吊销
+
+新版本把“固定 7 天 TTL”改成“长期有效 + 可主动吊销”：
+
+- 每条订阅都有独立访问 Token。
+- KV 中不保存订阅访问 Token 明文；Token 由 `SUB_ACCESS_TOKEN`、订阅 ID 与随机 nonce 通过 HMAC 派生。
+- “吊销”会让旧订阅 URL 立即返回 `410 Gone`。
+- “重新签发”会吊销旧 ID，并生成新的 ID 与新的访问 Token。
+- “删除”会永久删除对应 KV 记录。
+
+管理 API：
+
+```text
+GET    /api/subscriptions
+POST   /api/subscriptions/:id/revoke
+POST   /api/subscriptions/:id/reissue
+DELETE /api/subscriptions/:id
+```
+
+这些接口，以及 `POST /api/generate`，都要求请求头：
+
+```text
+X-Admin-Token: <SUB_ADMIN_TOKEN>
+```
+
+也支持：
+
+```text
+Authorization: Bearer <SUB_ADMIN_TOKEN>
+```
+
+### 重要安全边界
+
+吊销订阅 URL 只能阻止“再次下载订阅”。如果链接已经泄漏且他人已经把 VLESS UUID、Trojan 密码等节点凭据保存到客户端，仍需要在真实节点端轮换 UUID/密码，才能让已下载的旧节点彻底失效。
+
+### 旧记录兼容
+
+代码仍兼容旧版 KV 记录；旧记录继续使用历史的全局 `SUB_ACCESS_TOKEN` 校验。重新签发旧记录后会迁移到新格式。
 
 ## License
 
