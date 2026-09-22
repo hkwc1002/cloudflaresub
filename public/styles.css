@@ -580,6 +580,11 @@ button.small {
   align-items: center;
 }
 
+/* Self-check output can be multi-line (message + remediation hint). */
+.admin-status {
+  white-space: pre-wrap;
+}
+
 .admin-status[data-tone="ok"] {
   color: #bbf7d0;
 }

@@ -631,10 +631,10 @@ function createShortId(length = 10) {
   return out;
 }
 
-async function createUniqueShortId(env, tries = 8) {
+async function createUniqueShortId(kv, tries = 8) {
   for (let i = 0; i < tries; i++) {
     const id = createShortId(10);
-    const exists = await env.SUB_STORE.get(`sub:${id}`);
+    const exists = await kv.get(`sub:${id}`);
     if (!exists) return id;
   }
   throw new Error('无法生成唯一短链接，请稍后再试');
@@ -688,7 +688,7 @@ function getAdminToken(request) {
 }
 
 function validateAdmin(request, env) {
-  const expected = env.SUB_ADMIN_TOKEN || '';
+  const expected = env?.SUB_ADMIN_TOKEN || '';
   if (!expected) {
     return {
       ok: false,
@@ -718,7 +718,7 @@ function randomBase64Url(byteLength = 18) {
 }
 
 async function deriveSubscriptionToken(env, id, nonce) {
-  const secret = String(env.SUB_ACCESS_TOKEN || '');
+  const secret = String(env?.SUB_ACCESS_TOKEN || '');
   if (!secret) {
     throw new Error('未配置 SUB_ACCESS_TOKEN。');
   }
@@ -787,7 +787,11 @@ async function handleGenerate(request, env, url) {
   const adminCheck = validateAdmin(request, env);
   if (!adminCheck.ok) return adminCheck.response;
 
-  if (!env.SUB_ACCESS_TOKEN) {
+  const kvCheck = resolveKvBinding(env);
+  if (!kvCheck.ok) return kvCheck.response;
+  const kv = kvCheck.kv;
+
+  if (!env?.SUB_ACCESS_TOKEN) {
     return json(
       { ok: false, error: '未配置 SUB_ACCESS_TOKEN，无法签发订阅访问令牌。' },
       503,
@@ -822,10 +826,10 @@ async function handleGenerate(request, env, url) {
 
   const dedupHash = await buildDedupHash(body);
   const dedupKey = 'dedup:' + dedupHash;
-  let id = await env.SUB_STORE.get(dedupKey);
+  let id = await kv.get(dedupKey);
 
   if (id) {
-    const rawExisting = await env.SUB_STORE.get('sub:' + id);
+    const rawExisting = await kv.get('sub:' + id);
     if (rawExisting) {
       try {
         const existing = JSON.parse(rawExisting);
@@ -861,7 +865,7 @@ async function handleGenerate(request, env, url) {
     }
   }
 
-  id = await createUniqueShortId(env);
+  id = await createUniqueShortId(kv);
   const now = new Date().toISOString();
   const record = {
     schemaVersion: 2,
@@ -875,8 +879,8 @@ async function handleGenerate(request, env, url) {
   };
 
   // No expirationTtl: subscriptions remain valid until explicitly revoked/deleted.
-  await env.SUB_STORE.put('sub:' + id, JSON.stringify(record));
-  await env.SUB_STORE.put(dedupKey, id);
+  await kv.put('sub:' + id, JSON.stringify(record));
+  await kv.put(dedupKey, id);
 
   const urls = await buildSubscriptionUrls(url.origin, id, record, env);
   return json(
@@ -911,7 +915,7 @@ async function validateSubscriptionAccess(url, env, id, record) {
     if (record.status !== 'active') {
       return { ok: false, response: text('not found', 404) };
     }
-    if (!env.SUB_ACCESS_TOKEN) {
+  if (!env?.SUB_ACCESS_TOKEN) {
       return { ok: false, response: text('subscription token service unavailable', 503) };
     }
     const expected = await deriveSubscriptionToken(env, id, record.tokenNonce || '');
@@ -922,7 +926,7 @@ async function validateSubscriptionAccess(url, env, id, record) {
   }
 
   // Backward compatibility for surviving legacy records.
-  const legacyExpected = env.SUB_ACCESS_TOKEN || '';
+  const legacyExpected = env?.SUB_ACCESS_TOKEN || '';
   if (legacyExpected && (!provided || !constantTimeEqual(provided, legacyExpected))) {
     return { ok: false, response: text('Forbidden: invalid token', 403) };
   }
@@ -933,7 +937,11 @@ async function handleSub(url, env) {
   const id = url.pathname.split('/').pop();
   if (!id) return text('missing id', 400);
 
-  const raw = await env.SUB_STORE.get('sub:' + id);
+  const kvCheck = resolveKvBinding(env);
+  if (!kvCheck.ok) return kvCheck.response;
+  const { kv } = kvCheck;
+
+  const raw = await kv.get('sub:' + id);
   if (!raw) return text('not found', 404);
 
   let record;
@@ -963,94 +971,181 @@ async function handleSub(url, env) {
   return text(renderRaw(nodes), 200, 'text/plain; charset=utf-8');
 }
 
-async function listAllSubscriptionKeys(env) {
+/**
+ * Resolve and validate the KV binding before any read/write.
+ *
+ * The binding has to be a real KV namespace binding. Two failure modes are
+ * common when the Worker is deployed through Workers Builds (GitHub):
+ *   1. The namespace is only configured in the Dashboard and gets dropped by a
+ *      rebuild, so `env.SUB_STORE` is undefined.
+ *   2. The name `SUB_STORE` was added on the "Variables" tab (text/secret)
+ *      instead of the "Bindings" tab, so it is a string, not a namespace.
+ * Both previously surfaced as a generic "读取订阅列表失败。" with the real
+ * cause hidden in `detail`, which made this impossible to diagnose.
+ */
+function resolveKvBinding(env) {
+  const kv = env?.SUB_STORE;
+
+  if (!kv) {
+    return {
+      ok: false,
+      response: json(
+        {
+          ok: false,
+          code: 'KV_BINDING_MISSING',
+          error:
+            '未绑定 KV namespace（SUB_STORE），无法读写订阅。请在 Worker 的 Settings → Bindings 添加变量名为 SUB_STORE 的 KV namespace 绑定，然后重新部署。',
+        },
+        503,
+      ),
+    };
+  }
+
+  if (
+    typeof kv.get !== 'function' ||
+    typeof kv.put !== 'function' ||
+    typeof kv.delete !== 'function' ||
+    typeof kv.list !== 'function'
+  ) {
+    return {
+      ok: false,
+      response: json(
+        {
+          ok: false,
+          code: 'KV_BINDING_INVALID',
+          error:
+            'SUB_STORE 绑定类型错误：它不是 KV namespace 绑定（可能被配置成了文本变量或 Secret）。请在 Settings → Bindings 中改为 KV namespace 绑定后重新部署。',
+        },
+        503,
+      ),
+    };
+  }
+
+  return { ok: true, kv };
+}
+
+/**
+ * List every subscription key.
+ *
+ * Returns `{ keys, truncated }`. `truncated` is set when a page reports more
+ * data but gives no usable cursor: reporting a partial list as if it were
+ * complete would silently hide subscriptions (and the admin UI would claim
+ * "loaded N subscriptions" for an incomplete set).
+ */
+async function listAllSubscriptionKeys(kv) {
   const keys = [];
   let cursor = null;
+  let truncated = false;
 
   do {
-    const options = { prefix: 'sub:' };
+    const options = { prefix: 'sub:', limit: 1000 };
     if (cursor) {
       options.cursor = cursor;
     }
 
-    const page = await env.SUB_STORE.list(options);
+    const page = await kv.list(options);
     keys.push(...(page.keys || []));
 
     if (page.list_complete) {
       break;
     }
 
-    if (!page.cursor) {
-      throw new Error('KV list pagination returned no cursor.');
+    // A non-complete page without a usable cursor would loop forever; stop but
+    // flag the result so callers can tell "all keys" from "some keys".
+    if (!page.cursor || page.cursor === cursor) {
+      truncated = true;
+      break;
     }
 
     cursor = page.cursor;
   } while (true);
 
-  return keys;
+  return { keys, truncated };
+}
+
+/**
+ * Fan out KV reads in bounded batches. An unbounded `Promise.all` over every
+ * key can exceed the per-request subrequest limit once a user has many
+ * subscriptions.
+ */
+async function mapInBatches(items, batchSize, mapper) {
+  const results = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const chunk = items.slice(i, i + batchSize);
+    const chunkResults = await Promise.all(chunk.map(mapper));
+    results.push(...chunkResults);
+  }
+  return results;
 }
 
 async function handleListSubscriptions(request, env) {
   const adminCheck = validateAdmin(request, env);
   if (!adminCheck.ok) return adminCheck.response;
 
+  const kvCheck = resolveKvBinding(env);
+  if (!kvCheck.ok) return kvCheck.response;
+  const { kv } = kvCheck;
+
   try {
-    const keys = await listAllSubscriptionKeys(env);
-    const items = await Promise.all(
-      keys.map(async (key) => {
-        const raw = await env.SUB_STORE.get(key.name);
-        if (!raw) return null;
-        try {
-          const record = JSON.parse(raw);
-          const payload = getPayload(record) || {};
-          const id = key.name.slice('sub:'.length);
-          return {
-            id,
-            status: record?.schemaVersion === 2 ? record.status : 'legacy',
-            createdAt: record?.createdAt || payload.createdAt || '',
-            updatedAt: record?.updatedAt || '',
-            revokedAt: record?.revokedAt || null,
-            nodeCount: Array.isArray(payload.nodes) ? payload.nodes.length : 0,
-            namePrefix: payload.options?.namePrefix || '',
-          };
-        } catch {
-          return {
-            id: key.name.slice('sub:'.length),
-            status: 'invalid',
-            createdAt: '',
-            updatedAt: '',
-            revokedAt: null,
-            nodeCount: 0,
-            namePrefix: '',
-          };
-        }
-      }),
-    );
+    const { keys, truncated } = await listAllSubscriptionKeys(kv);
+    const items = await mapInBatches(keys, 20, async (key) => {
+      const raw = await kv.get(key.name);
+      if (!raw) return null;
+      try {
+        const record = JSON.parse(raw);
+        const payload = getPayload(record) || {};
+        const id = key.name.slice('sub:'.length);
+        return {
+          id,
+          status: record?.schemaVersion === 2 ? record.status : 'legacy',
+          createdAt: record?.createdAt || payload.createdAt || '',
+          updatedAt: record?.updatedAt || '',
+          revokedAt: record?.revokedAt || null,
+          nodeCount: Array.isArray(payload.nodes) ? payload.nodes.length : 0,
+          namePrefix: payload.options?.namePrefix || '',
+        };
+      } catch {
+        return {
+          id: key.name.slice('sub:'.length),
+          status: 'invalid',
+          createdAt: '',
+          updatedAt: '',
+          revokedAt: null,
+          nodeCount: 0,
+          namePrefix: '',
+        };
+      }
+    });
 
     return json({
       ok: true,
+      truncated,
       subscriptions: items
         .filter(Boolean)
         .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
     });
   } catch (error) {
+    // Surface the real cause instead of a generic message: a bare
+    // "读取订阅列表失败。" made this impossible to diagnose from the UI.
+    const detail = error instanceof Error ? error.message : String(error);
     return json(
       {
         ok: false,
-        error: '读取订阅列表失败。',
-        detail: error instanceof Error ? error.message : String(error),
+        code: 'KV_LIST_FAILED',
+        error: '读取订阅列表失败：' + detail,
+        detail,
       },
       500,
     );
   }
 }
 
-async function removeDedupMappingIfOwned(env, record, id) {
+async function removeDedupMappingIfOwned(kv, record, id) {
   const dedupKey = record?.dedupKey;
   if (!dedupKey) return;
-  const mappedId = await env.SUB_STORE.get(dedupKey);
+  const mappedId = await kv.get(dedupKey);
   if (mappedId === id) {
-    await env.SUB_STORE.delete(dedupKey);
+    await kv.delete(dedupKey);
   }
 }
 
@@ -1058,7 +1153,12 @@ async function handleRevokeSubscription(request, env, id) {
   const adminCheck = validateAdmin(request, env);
   if (!adminCheck.ok) return adminCheck.response;
 
-  const raw = await env.SUB_STORE.get('sub:' + id);
+
+  const kvCheck = resolveKvBinding(env);
+  if (!kvCheck.ok) return kvCheck.response;
+  const { kv } = kvCheck;
+
+  const raw = await kv.get('sub:' + id);
   if (!raw) return json({ ok: false, error: '订阅不存在。' }, 404);
 
   let current;
@@ -1088,22 +1188,27 @@ async function handleRevokeSubscription(request, env, id) {
           payload,
         };
 
-  await env.SUB_STORE.put('sub:' + id, JSON.stringify(next));
-  await removeDedupMappingIfOwned(env, next, id);
+  await kv.put('sub:' + id, JSON.stringify(next));
+  await removeDedupMappingIfOwned(kv, next, id);
   return json({ ok: true, id, status: 'revoked' });
 }
 
 async function handleReissueSubscription(request, env, url, id) {
   const adminCheck = validateAdmin(request, env);
   if (!adminCheck.ok) return adminCheck.response;
-  if (!env.SUB_ACCESS_TOKEN) {
+  if (!env?.SUB_ACCESS_TOKEN) {
     return json(
       { ok: false, error: '未配置 SUB_ACCESS_TOKEN，无法重新签发。' },
       503,
     );
   }
 
-  const raw = await env.SUB_STORE.get('sub:' + id);
+
+  const kvCheck = resolveKvBinding(env);
+  if (!kvCheck.ok) return kvCheck.response;
+  const { kv } = kvCheck;
+
+  const raw = await kv.get('sub:' + id);
   if (!raw) return json({ ok: false, error: '订阅不存在。' }, 404);
 
   let current;
@@ -1132,9 +1237,9 @@ async function handleReissueSubscription(request, env, url, id) {
           tokenNonce: randomBase64Url(18),
           payload,
         };
-  await env.SUB_STORE.put('sub:' + id, JSON.stringify(oldRecord));
+  await kv.put('sub:' + id, JSON.stringify(oldRecord));
 
-  const newId = await createUniqueShortId(env);
+  const newId = await createUniqueShortId(kv);
   const next = {
     schemaVersion: 2,
     status: 'active',
@@ -1148,10 +1253,10 @@ async function handleReissueSubscription(request, env, url, id) {
       createdAt: now,
     },
   };
-  await env.SUB_STORE.put('sub:' + newId, JSON.stringify(next));
+  await kv.put('sub:' + newId, JSON.stringify(next));
 
   if (next.dedupKey) {
-    await env.SUB_STORE.put(next.dedupKey, newId);
+    await kv.put(next.dedupKey, newId);
   }
 
   const urls = await buildSubscriptionUrls(url.origin, newId, next, env);
@@ -1168,17 +1273,22 @@ async function handleDeleteSubscription(request, env, id) {
   const adminCheck = validateAdmin(request, env);
   if (!adminCheck.ok) return adminCheck.response;
 
-  const raw = await env.SUB_STORE.get('sub:' + id);
+
+  const kvCheck = resolveKvBinding(env);
+  if (!kvCheck.ok) return kvCheck.response;
+  const { kv } = kvCheck;
+
+  const raw = await kv.get('sub:' + id);
   if (!raw) return json({ ok: true, id, deleted: false });
 
   try {
     const record = JSON.parse(raw);
-    await removeDedupMappingIfOwned(env, record, id);
+    await removeDedupMappingIfOwned(kv, record, id);
   } catch {
     // Delete malformed records as well.
   }
 
-  await env.SUB_STORE.delete('sub:' + id);
+  await kv.delete('sub:' + id);
   return json({ ok: true, id, deleted: true });
 }
 
@@ -1194,6 +1304,76 @@ function parseManagementRoute(pathname) {
   return null;
 }
 
+/**
+ * Self-check endpoint. It reports exactly which piece of the deployment is
+ * misconfigured so the UI can show an actionable message instead of a generic
+ * "读取订阅列表失败。".
+ */
+async function handleHealth(request, env) {
+  const adminCheck = validateAdmin(request, env);
+  if (!adminCheck.ok) return adminCheck.response;
+
+  const checks = {
+    kvBinding: 'missing',
+    kvReadWrite: 'skipped',
+    assetsBinding: env?.ASSETS && typeof env.ASSETS.fetch === 'function' ? 'ok' : 'missing',
+    accessToken: env?.SUB_ACCESS_TOKEN ? 'ok' : 'missing',
+    // SUB_ADMIN_TOKEN is not reported: validateAdmin already rejects the request
+    // with 503 when it is unset, so it can never be 'missing' here.
+  };
+
+  const kvCheck = resolveKvBinding(env);
+
+  if (kvCheck.ok) {
+    checks.kvBinding = 'ok';
+    // Probe outside the 'sub:' prefix so it can never appear as a subscription.
+    const probeKey = '__healthcheck__';
+    try {
+      await kvCheck.kv.put(probeKey, new Date().toISOString());
+      const value = await kvCheck.kv.get(probeKey);
+      await kvCheck.kv.delete(probeKey);
+      checks.kvReadWrite = value ? 'ok' : 'read-failed';
+    } catch (error) {
+      checks.kvReadWrite = 'error';
+      checks.kvError = error instanceof Error ? error.message : String(error);
+    }
+  } else {
+    // Read the code off the real response body so the two failure modes stay
+    // distinguishable here (missing binding vs. wrong binding type).
+    let code = 'KV_BINDING_ERROR';
+    try {
+      code = JSON.parse(await kvCheck.response.clone().text())?.code || code;
+    } catch {
+      // Keep the generic code if the body is not JSON.
+    }
+    checks.kvBinding = code === 'KV_BINDING_MISSING' ? 'missing' : 'invalid-type';
+  }
+
+  // ASSETS is required: the fetch handler falls through to env.ASSETS.fetch for
+  // every non-API path, so a missing binding breaks the whole site.
+  const ok =
+    checks.kvBinding === 'ok' &&
+    checks.kvReadWrite === 'ok' &&
+    checks.assetsBinding === 'ok' &&
+    checks.accessToken === 'ok';
+
+  const failing = Object.entries(checks)
+    .filter(([key, value]) => key !== 'kvError' && value !== 'ok')
+    .map(([key, value]) => key + '=' + value);
+
+  return json(
+    ok
+      ? { ok: true, checks }
+      : {
+          ok: false,
+          code: 'HEALTHCHECK_FAILED',
+          error: '部署自检未通过：' + failing.join('，'),
+          checks,
+        },
+    ok ? 200 : 503,
+  );
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -1206,6 +1386,10 @@ export default {
           'access-control-allow-headers': 'content-type,x-admin-token,authorization',
         },
       });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/health') {
+      return handleHealth(request, env);
     }
 
     if (request.method === 'POST' && url.pathname === '/api/generate') {
@@ -1233,6 +1417,9 @@ export default {
       return handleSub(url, env);
     }
 
+    if (!env?.ASSETS || typeof env.ASSETS.fetch !== 'function') {
+      return text('ASSETS binding is missing; static assets cannot be served.', 503);
+    }
     return env.ASSETS.fetch(request);
   },
 };
