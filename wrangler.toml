@@ -3,6 +3,25 @@ main = "src/worker.js"
 compatibility_date = "2026-03-06"
 workers_dev = true
 
+# ---------------------------------------------------------------------------
+# KV binding for subscriptions.
+#
+# IMPORTANT: Workers Builds (the GitHub integration) deploys exactly what this
+# file declares. If SUB_STORE is only configured in the Dashboard, a dashboard
+# edit can be lost on the next rebuild and every API call fails with
+# "读取订阅列表失败。".
+#
+# Keep the binding here so a Git deploy always reconstructs it. Fill in the real
+# namespace id from: Cloudflare Dashboard -> Storage & Databases -> KV, or run
+# `npx wrangler kv namespace list`.
+#
+# `preview_id` is optional; wrangler dev falls back to `id` when it is absent.
+# ---------------------------------------------------------------------------
+# [[kv_namespaces]]
+# binding = "SUB_STORE"
+# id = "<your-kv-namespace-id>"
+# preview_id = "<your-preview-kv-namespace-id>"
+
 [assets]
 directory = "./public"
 binding = "ASSETS"

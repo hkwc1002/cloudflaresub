@@ -21,6 +21,7 @@ const saveAdminTokenBtn = document.getElementById('saveAdminTokenBtn');
 const clearAdminTokenBtn = document.getElementById('clearAdminTokenBtn');
 const refreshSubscriptionsBtn = document.getElementById('refreshSubscriptionsBtn');
 const adminStatus = document.getElementById('adminStatus');
+const runHealthCheckBtn = document.getElementById('runHealthCheckBtn');
 const subscriptionTableBody = document.getElementById('subscriptionTableBody');
 const subscriptionEmpty = document.getElementById('subscriptionEmpty');
 
@@ -65,9 +66,79 @@ async function adminFetch(url, options = {}) {
     data = { ok: false, error: '服务器返回了非 JSON 响应。' };
   }
   if (!response.ok || data.ok === false) {
-    throw new Error(data.error || ('请求失败：HTTP ' + response.status));
+    // Prefer the actionable `code` when the backend supplies one, so the UI can
+    // explain an unbound KV namespace instead of showing a generic failure.
+    throw new Error(describeApiError(data, response.status));
   }
   return data;
+}
+
+const ERROR_HINTS = {
+  KV_BINDING_MISSING:
+    '未绑定 KV namespace。请在 Cloudflare Dashboard → 该 Worker → Settings → Bindings 添加 Variable name 为 SUB_STORE 的 KV namespace 绑定，然后重新部署。',
+  KV_BINDING_INVALID:
+    'SUB_STORE 绑定类型不对。它必须绑定为 KV namespace，不能在 Variables 里当成文本变量或 Secret。',
+  KV_LIST_FAILED: '读取 KV 失败，请检查 KV namespace 是否归属同一账号、绑定是否指向正确的 namespace。',
+  HEALTHCHECK_FAILED: '请按上方未通过的项目逐项检查 Worker 的 Bindings 与 Secrets 配置。',
+};
+
+// Checks that actually block subscription management. `assetsBinding` is
+// reported by /api/health but does not affect the API, so it must not stop the
+// subscription list from loading.
+const BLOCKING_CHECKS = ['kvBinding', 'kvReadWrite'];
+
+function healthBlocksSubscriptionLoad(health) {
+  const checks = health?.checks || {};
+  return BLOCKING_CHECKS.some((key) => checks[key] && checks[key] !== 'ok');
+}
+function describeApiError(data, status) {
+  const base = data?.error || ('请求失败：HTTP ' + status);
+  const hint = data?.code ? ERROR_HINTS[data.code] : '';
+  if (hint && !base.includes(hint)) {
+    return base + '\n\n' + hint;
+  }
+  return base;
+}
+
+async function runHealthCheck({ quiet = false } = {}) {
+  const token = getAdminToken();
+  if (!token) {
+    setAdminStatus('请先输入并保存 SUB_ADMIN_TOKEN，再运行环境自检。', 'danger');
+    return null;
+  }
+
+  if (!quiet) setAdminStatus('正在运行环境自检...');
+
+  try {
+    const response = await fetch('/api/health', {
+      headers: { 'x-admin-token': token },
+    });
+    const data = await response.json();
+    const checks = data?.checks || {};
+    const text = [
+      'KV 绑定: ' + (checks.kvBinding || '?'),
+      'KV 读写: ' + (checks.kvReadWrite || '?'),
+      '静态资源绑定: ' + (checks.assetsBinding || '?'),
+      'SUB_ACCESS_TOKEN: ' + (checks.accessToken || '?'),
+    ].join('；');
+
+    if (data?.ok) {
+      setAdminStatus('环境自检通过 — ' + text, 'ok');
+    } else {
+      const lines = ['环境自检未通过 — ' + text];
+      // Show the backend's failing-item summary: without it a failure caused by
+      // a check that is not in the line above (e.g. assetsBinding) is invisible.
+      if (data?.error) lines.push(data.error);
+      if (checks.kvError) lines.push('KV 错误：' + checks.kvError);
+      const hint = data?.code ? ERROR_HINTS[data.code] : '';
+      if (hint) lines.push(hint);
+      setAdminStatus(lines.join('\n'), 'danger');
+    }
+    return data;
+  } catch (error) {
+    if (!quiet) setAdminStatus('自检请求失败：' + (error.message || '未知错误'), 'danger');
+    return null;
+  }
 }
 
 const savedAdminToken = getAdminToken();
@@ -86,12 +157,27 @@ saveAdminTokenBtn.addEventListener('click', async () => {
   }
   sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, value);
   setAdminStatus('已保存到当前标签页会话。', 'ok');
+
+  // Run the environment self-check first. Only a broken KV binding can stop the
+  // subscription list from loading; an unrelated failure (e.g. ASSETS) must not
+  // block it, so gate on the blocking checks rather than `health.ok`.
+  const health = await runHealthCheck({ quiet: true });
+  if (healthBlocksSubscriptionLoad(health)) {
+    return;
+  }
+
   try {
     await loadSubscriptions();
   } catch (error) {
     setAdminStatus(error.message || '管理员令牌验证失败。', 'danger');
   }
 });
+
+if (runHealthCheckBtn) {
+  runHealthCheckBtn.addEventListener('click', async () => {
+    await runHealthCheck();
+  });
+}
 
 clearAdminTokenBtn.addEventListener('click', () => {
   sessionStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
@@ -191,7 +277,17 @@ async function loadSubscriptions() {
 
   subscriptionEmpty.classList.add('hidden');
   subscriptionTableBody.innerHTML = rows.map(renderSubscriptionRow).join('');
-  setAdminStatus('管理员令牌有效；已加载 ' + rows.length + ' 条订阅。', 'ok');
+
+  // `truncated` means KV pagination stalled, so the list is incomplete and the
+  // admin must not be told every subscription was loaded.
+  if (data.truncated) {
+    setAdminStatus(
+      '管理员令牌有效；已加载 ' + rows.length + ' 条订阅，但 KV 分页未完成，列表可能不完整，请刷新重试。',
+      'danger',
+    );
+  } else {
+    setAdminStatus('管理员令牌有效；已加载 ' + rows.length + ' 条订阅。', 'ok');
+  }
 }
 
 function renderSubscriptionRow(item) {
